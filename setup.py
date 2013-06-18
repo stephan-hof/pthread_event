@@ -21,6 +21,7 @@ setup(
     keywords='event pthread',
     author='Stephan Hofmockel',
     author_email="Use the github issues",
+    url='https://github.com/stephan-hof/pthread_event',
     license='boost',
     packages=['tests'],
     ext_modules=[mod]
