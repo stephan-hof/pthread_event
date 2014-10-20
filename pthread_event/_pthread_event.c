@@ -1,5 +1,7 @@
 #include "Python.h"
 #include <pthread.h>
+#include <semaphore.h>
+#include <errno.h>
 
 typedef struct {
     PyObject_HEAD
@@ -178,7 +180,7 @@ static PyMethodDef Event_methods[] = {
 static PyTypeObject EventType = {
     PyObject_HEAD_INIT(NULL)
     0,                         /*ob_size*/
-    "pthread_event.Event",     /*tp_name*/
+    "_pthread_event.Event",     /*tp_name*/
     sizeof(Event),             /*tp_basicsize*/
     0,                         /*tp_itemsize*/
     (destructor)Event_dealloc, /*tp_dealloc*/
@@ -217,19 +219,159 @@ static PyTypeObject EventType = {
     Event_new,                 /* tp_new */
 };
 
+typedef struct {
+    PyObject_HEAD
+    sem_t lock;
+    unsigned int locked:1;
+} SemLock;
+
+static PyObject *
+SemLock_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    int error;
+    SemLock *self = (SemLock*) type->tp_alloc(type, 0);
+
+    error = sem_init(&self->lock, 0, 1);
+    if (error) {
+        type->tp_free(self);
+        return py_error_from_error("Cannot init sem", errno);
+    }
+    self->locked = 0;
+    return (PyObject*)self;
+}
+
+static void
+SemLock_dealloc(SemLock *self)
+{
+    sem_destroy(&self->lock);
+    Py_TYPE(self)->tp_free(self);
+}
+
+static PyObject*
+SemLock_acquire(SemLock *self, PyObject *args)
+{
+    PyObject *py_timeout = NULL;
+    struct timespec timeout;
+    int error;
+
+    if (!PyArg_ParseTuple(args, "|O:timeout", &py_timeout)) {
+        return NULL;
+    }
+
+    if (py_timeout != NULL) {
+        if (parse_timeout(py_timeout, &timeout) == -1) {
+            return NULL;
+        }
+    }
+
+    Py_BEGIN_ALLOW_THREADS
+    if (py_timeout == NULL) {
+        error = sem_wait(&self->lock);
+    }
+    else {
+        error = sem_timedwait(&self->lock, &timeout);
+    }
+    Py_END_ALLOW_THREADS
+
+    if (error) {
+        if ((errno == ETIMEDOUT) || (errno == EINTR)) {
+            Py_RETURN_FALSE;
+        }
+        else {
+            return py_error_from_error("Cannot acquire", errno);
+        }
+    }
+    self->locked = 1;
+    Py_RETURN_TRUE;
+}
+
+static PyObject*
+SemLock_release(SemLock *self)
+{
+    int error;
+    if (self->locked == 0) {
+        return PyErr_Format(PyExc_Exception, "release unlocked lock");
+    }
+
+    error = sem_post(&self->lock);
+    if (error) {
+        return py_error_from_error("Cannot release", errno);
+    }
+    self->locked = 0;
+    Py_RETURN_NONE;
+}
+
+static PyMethodDef SemLock_methods[] = {
+    {"release", (PyCFunction)SemLock_release, METH_NOARGS, ""},
+    {"acquire", (PyCFunction)SemLock_acquire, METH_VARARGS, ""},
+    {NULL, NULL, 0, NULL}
+};
+
+
+static PyTypeObject SemLockType = {
+    PyObject_HEAD_INIT(NULL)
+    0,                            /*ob_size*/
+    "_pthread_event.SemLock",      /*tp_name*/
+    sizeof(SemLock),              /*tp_basicsize*/
+    0,                            /*tp_itemsize*/
+    (destructor)SemLock_dealloc,  /*tp_dealloc*/
+    0,                         /*tp_print*/
+    0,                         /*tp_getattr*/
+    0,                         /*tp_setattr*/
+    0,                         /*tp_compare*/
+    0,                         /*tp_repr*/
+    0,                         /*tp_as_number*/
+    0,                         /*tp_as_sequence*/
+    0,                         /*tp_as_mapping*/
+    0,                         /*tp_hash */
+    0,                         /*tp_call*/
+    0,                         /*tp_str*/
+    0,                         /*tp_getattro*/
+    0,                         /*tp_setattro*/
+    0,                         /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE, /*tp_flags*/
+    "",                        /* tp_doc */
+    0,                         /* tp_traverse */
+    0,                         /* tp_clear */
+    0,                         /* tp_richcompare */
+    0,                         /* tp_weaklistoffset */
+    0,                         /* tp_iter */
+    0,                         /* tp_iternext */
+    SemLock_methods,           /* tp_methods */
+    0,                         /* tp_members */
+    0,                         /* tp_getset */
+    0,                         /* tp_base */
+    0,                         /* tp_dict */
+    0,                         /* tp_descr_get */
+    0,                         /* tp_descr_set */
+    0,                         /* tp_dictoffset */
+    0,                         /* tp_init */
+    0,                         /* tp_alloc */
+    SemLock_new,               /* tp_new */
+};
+
+
+
 PyMODINIT_FUNC
-initpthread_event(void) {
+init_pthread_event(void) {
     PyObject *module;
 
     if (PyType_Ready(&EventType) < 0) {
         return;
     }
 
-    module = Py_InitModule("pthread_event", NULL);
+    if (PyType_Ready(&SemLockType) < 0) {
+        return;
+    }
+
+    module = Py_InitModule("pthread_event._pthread_event", NULL);
     if (module == NULL) {
         return;
     }
 
     Py_INCREF((PyObject*) &EventType);
     PyModule_AddObject(module, "Event", (PyObject*)&EventType);
+
+    Py_INCREF((PyObject*) &SemLockType);
+    PyModule_AddObject(module, "SemLock", (PyObject*)&SemLockType);
 }
